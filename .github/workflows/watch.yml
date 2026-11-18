@@ -1,0 +1,50 @@
+# Checks the private project board and, only if it changed since the last publish,
+# starts the site rebuild in the private repository. Runs in this public repo because
+# Actions minutes are free here. Logs are public: print nothing about the board.
+#
+# Started every 5 minutes by an external cron (POST to the workflow_dispatch API with a
+# token that can only run Actions in this repo), with a GitHub schedule as a backup.
+# Secret: WATCH_TOKEN (token with repo + read:project, same as BOARD_TOKEN in the private repo).
+name: Watch board
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+
+concurrency:
+  group: watch
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Compare board with published site
+        env:
+          GH_TOKEN: ${{ secrets.WATCH_TOKEN }}
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/w/scripts" && cd "$RUNNER_TEMP/w"
+          if ! gh api repos/M-A-S1/phd-dc7/contents/scripts/export_board.py \
+                 -H "Accept: application/vnd.github.raw" > scripts/export_board.py 2>/dev/null \
+             || ! python3 scripts/export_board.py > out.txt 2>&1; then
+            echo "::error::Could not read the board (check the WATCH_TOKEN secret)"; exit 1
+          fi
+          hash=$(sed -n 's/^hash=//p' out.txt)
+          live=$(gh api repos/M-A-S1/phd-dc7-guide/contents/board.sha?ref=main \
+                   -H "Accept: application/vnd.github.raw" 2>/dev/null | tr -d '[:space:]' || true)
+          if [ -n "$hash" ] && [ "$hash" != "$live" ]; then
+            if gh run list -R M-A-S1/phd-dc7 -w site.yml --json status \
+                 -q '[.[] | select(.status != "completed")] | length' 2>/dev/null | grep -qv '^0$'; then
+              echo "Board changed; a rebuild is already running"
+            else
+              gh workflow run site.yml -R M-A-S1/phd-dc7 >/dev/null
+              echo "Board changed: rebuild started"
+            fi
+          else
+            echo "Board unchanged"
+          fi
